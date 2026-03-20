@@ -1,14 +1,12 @@
 
 import random
+import math
 
 LFSR_POLY = 0xB8
 BUFFER_SIZE = 128
 CYCLO_DEGREE = 8
 
 def step_lfsr(state):
-    # Standard 8-bit LFSR (Galois)
-    # x^8 + x^6 + x^5 + x^4 + 1
-    # Actually, let's use a simpler one or ensure consistency with the Arduino code
     bit = state & 1
     state >>= 1
     if bit:
@@ -18,7 +16,6 @@ def step_lfsr(state):
 def generate_filtered_output(seed, length):
     state = seed
     bits = []
-    # Pre-generate bits
     s = state
     for _ in range(length + CYCLO_DEGREE + 1):
         s, bit = step_lfsr(s)
@@ -26,7 +23,6 @@ def generate_filtered_output(seed, length):
 
     output = []
     for i in range(length):
-        # Phi_16(z) = 1*h[i] + 1*h[i+8]
         val = bits[i] + bits[i + 8]
         output.append(val * 127)
     return output
@@ -34,43 +30,72 @@ def generate_filtered_output(seed, length):
 def calculate_error(sig1, sig2):
     return sum((a - b) ** 2 for a, b in zip(sig1, sig2))
 
+def generate_svg(signals, filename="comparison_plot.svg"):
+    width = 800
+    height = 400
+    padding = 50
+
+    def scale_x(x):
+        return padding + (x / (BUFFER_SIZE - 1)) * (width - 2 * padding)
+
+    def scale_y(y):
+        return height - padding - (y / 255.0) * (height - 2 * padding)
+
+    svg = [f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">']
+    svg.append(f'<rect width="100%" height="100%" fill="white" />')
+    svg.append(f'<line x1="{padding}" y1="{height-padding}" x2="{width-padding}" y2="{height-padding}" stroke="black" />')
+    svg.append(f'<line x1="{padding}" y1="{padding}" x2="{padding}" y2="{height-padding}" stroke="black" />')
+
+    colors = ["blue", "red", "green"]
+    for idx, (label, signal) in enumerate(signals.items()):
+        color = colors[idx % len(colors)]
+        points = " ".join([f"{scale_x(i)},{scale_y(v)}" for i, v in enumerate(signal)])
+        svg.append(f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="2" opacity="0.7" />')
+        svg.append(f'<text x="{width-150}" y="{30 + idx*20}" fill="{color}">{label}</text>')
+
+    svg.append('</svg>')
+
+    with open(filename, "w") as f:
+        f.write("\n".join(svg))
+    print(f"Generated {filename}")
+
 def main():
-    # 1. Generate a "target" signal using a known seed
+    # Target 1: A sine wave
+    sine_target = [int(127 + 127 * math.sin(2 * math.pi * i / 32)) for i in range(BUFFER_SIZE)]
+
+    # Target 2: An LFSR signal with noise
     true_seed = 42
-    target_signal = generate_filtered_output(true_seed, BUFFER_SIZE)
-    print(f"Target signal generated with seed {true_seed}")
+    lfsr_target = generate_filtered_output(true_seed, BUFFER_SIZE)
+    lfsr_target_noised = [max(0, min(255, s + random.randint(-15, 15))) for s in lfsr_target]
 
-    # 2. Add some deterministic "noise" to simulate analogRead variations
-    # (Just to make it more realistic, though not strictly necessary)
-    target_signal = [max(0, min(255, s + random.randint(-10, 10))) for s in target_signal]
+    def find_best(target):
+        best_state = 1
+        min_err = float('inf')
+        for s in range(1, 256):
+            out = generate_filtered_output(s, BUFFER_SIZE)
+            err = calculate_error(target, out)
+            if err < min_err:
+                min_err = err
+                best_state = s
+        return best_state, generate_filtered_output(best_state, BUFFER_SIZE)
 
-    # 3. Simulate the randomized search
-    best_state = 1
-    min_error = float('inf')
+    print("Finding best match for Sine target...")
+    sine_best_seed, sine_approx = find_best(sine_target)
 
-    print("Starting search...")
-    # There are only 255 possible seeds for an 8-bit LFSR.
-    # An exhaustive search is actually feasible.
-    for candidate_state in range(1, 256):
-        candidate_output = generate_filtered_output(candidate_state, BUFFER_SIZE)
+    print("Finding best match for LFSR target...")
+    lfsr_best_seed, lfsr_approx = find_best(lfsr_target_noised)
 
-        error = calculate_error(target_signal, candidate_output)
+    # Generate SVG for LFSR comparison
+    generate_svg({
+        "Target (Noised)": lfsr_target_noised,
+        "Best LFSR Match": lfsr_approx
+    }, "lfsr_comparison.svg")
 
-        if error < min_error:
-            min_error = error
-            best_state = candidate_state
-            print(f"Found state {best_state}, Error {min_error}")
-
-    print(f"\nSearch finished.")
-    print(f"True seed: {true_seed}")
-    print(f"Found seed: {best_state}")
-
-    if best_state == true_seed:
-        print("SUCCESS: Converged to the correct seed!")
-    else:
-        print(f"Final error: {min_error}")
-        # Sometimes multiple seeds might lead to the same sequence if they're in the same cycle.
-        # But in a cycle of 255, each state is unique.
+    # Generate SVG for Sine approximation
+    generate_svg({
+        "Sine Target": sine_target,
+        "Best LFSR Match": sine_approx
+    }, "sine_approximation.svg")
 
 if __name__ == "__main__":
     main()
